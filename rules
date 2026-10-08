@@ -1,0 +1,732 @@
+# BELOTE ONLINE: Full Build Prompt for an AI Coding Assistant
+
+> **How to use:** Paste this whole file into your AI coding assistant (Copilot, Claude, ChatGPT, Cursor, etc.) and say: *"Build exactly what this document describes. Output every file in full."*
+> Everything below is a requirement unless it is marked **OPTIONAL**.
+
+---
+
+## 0. YOUR ROLE AND OUTPUT CONTRACT
+
+You are a senior full-stack engineer and card-game rules expert. Build a complete, runnable, multiplayer **Belote** web game.
+
+**Output contract (follow strictly):**
+
+1. Output the **complete source of every file** in the project tree in Section 3. No "rest of the code here", no pseudo-code, no stubs.
+2. Each logical concern lives in **its own file** (game rules, bot, rooms, sockets, disconnect handling, UI screens, and so on). No giant "god files".
+3. Do not ask me questions. Where the rules are unclear, use the **"Resolved decisions"** in Section 4.19. Do not invent other rules.
+4. The server is **authoritative**. The client only sends *intentions* (play this card, accept trump). The server validates everything.
+5. Include a `README.md` with install, build, run, test, and deploy notes.
+6. After the code, give a short checklist that maps each requirement in Section 12 (Acceptance Criteria) to the file that fulfils it.
+
+---
+
+## 1. PRODUCT OVERVIEW
+
+An online Belote game in a **casino-style** setting.
+
+- One human creates a room and gets a random **5-character code** (letters and digits).
+- The host can **invite other people** (by link or code) and/or **add up to 3 bots**. Humans and bots can be mixed, up to **4 seats in total**.
+- Game modes follow the player count: **2 players** (head to head), **3 players** (each for themselves), **4 players** (two pairs, partners sit opposite).
+- Everything runs in real time over **WebSockets (Socket.IO)**.
+- If a human disconnects, the game **waits 1 to 2 minutes**. If they do not return, a **high-intelligence autopilot bot** plays for them so the game is not disrupted.
+- Bots have **three difficulty levels** (Medium, High, Expert) and a **random aggression** value assigned when the game starts.
+
+---
+
+## 2. TECH STACK (EXACT)
+
+| Layer | Requirement |
+|---|---|
+| Runtime | Node.js 20 LTS (18+ must also work) |
+| Server | **Node.js + Express 4** serving the static front end and a tiny JSON API |
+| Realtime | **Socket.IO 4.x** (server and client). Use the `websocket` transport first, `polling` as a fallback |
+| Front end | Plain HTML + ES modules (no framework). Served from `/public` |
+| CSS | **Tailwind CSS exactly `3.4.17`** and **daisyUI exactly `4.12.24`**, pinned with no `^` or `~` |
+| CSS build | Tailwind CLI building `public/css/input.css` to `public/css/app.css`. Do **not** use the Tailwind Play CDN |
+| Tests | Node's built-in `node:test` (or Jest) plus `socket.io-client` for integration tests |
+
+`package.json` must pin: `"tailwindcss": "3.4.17"`, `"daisyui": "4.12.24"`. Scripts: `dev`, `start`, `build:css`, `watch:css`, `test`, `simulate`.
+
+---
+
+## 3. PROJECT STRUCTURE (ONE LOGIC PER FILE)
+
+```
+belote/
+├─ package.json
+├─ tailwind.config.js              # custom daisyUI "casino" theme
+├─ .env.example                    # PORT, CORS_ORIGIN, GITHUB_URL, RECONNECT_GRACE_MS ...
+├─ README.md
+├─ server/
+│  ├─ index.js                     # bootstrap: express + http + socket.io + graceful shutdown
+│  ├─ config.js                    # ALL tunables in one place (timers, defaults, GITHUB_URL ...)
+│  ├─ http/
+│  │  ├─ app.js                    # express app, static, /healthz, /api/room/:code/exists
+│  │  └─ spaFallback.js            # makes /r/:code and /?room=CODE load index.html
+│  ├─ sockets/
+│  │  ├─ index.js                  # io setup, auth/session middleware, rate limiter
+│  │  ├─ lobbyHandlers.js          # create/join/rejoin/leave/addBot/removeBot/settings/start
+│  │  ├─ gameHandlers.js           # bid/swap7/declare/playCard/callFinish/playAgain
+│  │  ├─ session.js                # playerId + secret token <-> socket mapping, takeover of old sockets
+│  │  └─ rateLimiter.js
+│  ├─ rooms/
+│  │  ├─ Room.js                   # one room: seats, host, settings, state, broadcast
+│  │  ├─ RoomManager.js            # create/find/destroy rooms, cleanup of empty rooms
+│  │  ├─ codeGenerator.js          # 5-char codes, normalisation, validation
+│  │  └─ DisconnectManager.js      # 1-2 min grace timer, countdown events, autopilot handover
+│  ├─ game/                        # PURE rules code. No sockets, no timers, easy to unit test
+│  │  ├─ constants.js              # suits, ranks, orders, point values, scoring tables
+│  │  ├─ Card.js
+│  │  ├─ Deck.js                   # build 32-card deck, shuffle (crypto RNG), cut
+│  │  ├─ combinations.js           # detect Brelan, runs (Tierce/Quarte/Quint), Belote
+│  │  ├─ declarations.js           # declaration order, comparison, who scores what
+│  │  ├─ trickRules.js             # legal-move calculation, trick winner
+│  │  ├─ scoring.js                # hand totals, prizes, capot, match totals
+│  │  ├─ penalties.js              # penalty table and apply function
+│  │  ├─ finishRule.js             # "I have finished" eligibility and evaluation
+│  │  ├─ Match.js                  # target score, dealer rotation, hand history, winner
+│  │  ├─ HandEngine.js             # state machine of ONE hand (phases below)
+│  │  ├─ modes/
+│  │  │  ├─ twoPlayer.js           # dealing + trump selection for 2 players
+│  │  │  ├─ threePlayer.js
+│  │  │  └─ fourPlayer.js          # pairs
+│  │  └─ views.js                  # builds the per-player redacted view (never leak hands)
+│  ├─ bots/
+│  │  ├─ botNames.js               # the 15 names
+│  │  ├─ BotFactory.js             # picks random name + random difficulty
+│  │  ├─ BotController.js          # think delay, calls the engine as a normal player
+│  │  ├─ BotMemory.js              # card counting, void inference
+│  │  ├─ handEvaluator.js          # trump strength scoring
+│  │  ├─ aggression.js             # aggression profile and how it bends decisions
+│  │  ├─ autopilot.js              # Expert brain used when a human leaves
+│  │  └─ strategies/
+│  │     ├─ medium.js
+│  │     ├─ high.js
+│  │     └─ expert.js              # determinised Monte-Carlo search
+│  └─ utils/
+│     ├─ rng.js                    # crypto-based random helpers
+│     └─ logger.js
+├─ public/
+│  ├─ index.html
+│  ├─ css/
+│  │  ├─ input.css                 # @tailwind directives + custom casino/card CSS
+│  │  └─ app.css                   # built output
+│  └─ js/
+│     ├─ main.js                   # boot, screen router
+│     ├─ socketClient.js           # connection, reconnect, acks, resync
+│     ├─ store.js                  # tiny state store + subscribe
+│     ├─ rulesContent.js           # the full rules text shown in the Rules modal
+│     ├─ screens/
+│     │  ├─ menuScreen.js
+│     │  ├─ joinScreen.js
+│     │  ├─ lobbyScreen.js
+│     │  └─ gameScreen.js
+│     └─ components/
+│        ├─ cardRenderer.js        # builds the card DOM (design in Section 9.4)
+│        ├─ tableView.js           # felt, seats, trick area, trump badge
+│        ├─ scoreboard.js
+│        ├─ rulesModal.js
+│        ├─ toast.js
+│        ├─ footer.js              # creator + GitHub
+│        └─ sound.js               # OPTIONAL, with mute toggle
+└─ tests/
+   ├─ rules.combinations.test.js
+   ├─ rules.trick.test.js
+   ├─ rules.scoring.test.js
+   ├─ engine.flow.test.js
+   ├─ bots.simulation.test.js
+   ├─ rooms.codes.test.js
+   └─ sockets.integration.test.js
+```
+
+**Rule for `server/game/*`:** these files must stay free of sockets, timers and randomness that cannot be seeded. Randomness only comes through `utils/rng.js`, so tests can pass a seed.
+
+---
+
+## 4. THE GAME RULES (COMPLETE, NOTHING SKIPPED)
+
+This section contains **every rule from the supplied rule text**. Where my research found a conflict with the standard game, it is called out in **4.18 (Verification notes)** and settled in **4.19 (Resolved decisions)**.
+
+### 4.1 Aim of the game
+Each player declares the combinations of the cards they hold and tries to beat their opponent with as many tricks as possible, in order to **revalue their cards** and reach, over several hands, the **target score**. The target is **1,000 points** by default. The host may choose another target in the lobby before the game starts (the players "agree beforehand"). Allowed range: 200 to 5,000, in steps of 50.
+
+### 4.2 Deck
+A 32-card French deck is used: **7, 8, 9, 10, J, Q, K, A** in four suits. The 2s, 3s, 4s, 5s and 6s are not used.
+
+### 4.3 Number of players
+2, 3 or 4 players. They play **individually**, except with 4 players, where they normally play **in pairs** (partners opposite). The detailed rules below are written for **two players** first. Pairs are in 4.16 and three players in 4.17.
+
+### 4.4 Order and value of the cards
+
+**Order (highest to lowest)**
+
+| Suit type | Order |
+|---|---|
+| Non-trump suits | **A, 10, K, Q, J, 9, 8, 7** |
+| Trump suit | **J, 9, A, 10, K, Q, 8, 7** |
+
+**Point values**
+
+| Card | Trump suit | Other suits |
+|---|---|---|
+| Jack | **20** | 2 |
+| Nine | **14** | 0 |
+| Ace | 11 | 11 |
+| Ten | 10 | 10 |
+| King | **10 as written in the supplied text; standard Belote is 4** (see 4.18 and 4.19) | same as trump |
+| Queen | 3 | 3 |
+| Eight | 0 | 0 |
+| Seven | 0 | 0 |
+
+`constants.js` must expose the king value through one setting `RULES.kingPoints` (4 or 10). **Default: 4** (verified standard). The host can switch it to 10 in the lobby.
+
+### 4.5 Dealing (two players)
+1. Each player draws a card. The player who draws the **lowest** card is the **first dealer**. (Digital version: show a short "cut for deal" animation with a fair random result.)
+2. The dealer shuffles and offers the deck to the opponent, the **"hand"**, to **cut** (digital: automatic cut using the RNG, with a small animation).
+3. The dealer deals **6 cards to each player, in groups of 3**. (3 then 3.)
+4. The **top card of the undealt deck is turned face up** and left next to the deck. Its suit is the **proposed trump**.
+5. **After each hand, the player with the highest score in that hand becomes the next dealer.** If the hand scores are tied, the dealer changes.
+6. **If after a hand both players passed** (no trump chosen, hand cancelled), the player who **did not deal** in the previous hand deals next.
+
+### 4.6 Trump selection (two players)
+
+**First turn (the turned-up card)**
+- The **"hand"** looks at their 6 cards. The strength of the suit (mainly the **jack and the nine**) and the number of main cards in other suits decide whether they **accept** the proposed trump. If they do not like it they say **"Pass"**.
+- Then the **dealer** looks at their own 6 cards and also **accepts** (the trump is set and the game starts) or **passes**.
+
+**Second turn (only if both passed the first turn)**
+- The **"hand"** may **choose any suit** as trump, or pass.
+- If the hand passes again, the **dealer** may **choose a new trump suit** or pass.
+- If the dealer passes too, **that deal is cancelled** and the cards are dealt again. (Dealer then changes, see 4.5 point 6.)
+
+### 4.7 After the trump is set (two players)
+1. The dealer gives each player **3 more cards, one at a time** (everyone then has 9 cards).
+2. The dealer takes the **bottom card of the deck** and places it **face up next to the first turned-up card**. This **second card has no use in the game**. It only serves as guidance for both players (it is a known dead card, which the bots should also account for).
+3. **The seven exchange.** When the trump suit equals the **suit of the first turned-up card**, the player who holds **the seven of that suit** may **take the turned-up card, replacing it with the seven**, to complete or improve a combination in their hand. The exchange is made **immediately after the three extra cards are dealt**, before declarations. (The source text says "at the moment in which the opponent of the holder of the seven of trumps has begun their game". It is ambiguous, so see 4.19, decision D4.)
+4. The seven that is placed on the table stays face up and visible to everyone.
+
+### 4.8 Combinations (three kinds)
+
+**A. Brelan** (four of a kind): four cards of equal rank.
+When both players have a Brelan, **the higher-valued Brelan wins and cancels the other**.
+
+| Brelan | Points |
+|---|---|
+| 4 jacks | **200** |
+| 4 nines | **150** |
+| 4 aces | 100 |
+| 4 tens | 100 |
+| 4 kings | 100 |
+| 4 queens | 100 |
+| 4 eights / 4 sevens | **no value** (not declarable) |
+
+If both Brelans have the same value (for example, 100 versus 100) the higher-ranked one wins in the order A, 10, K, Q. If that is also equal (impossible with one deck), the player who declared first wins.
+
+**B. Escalera / Run** (sequence of 3, 4 or 5+ cards of the **same suit**).
+
+| Run | Name | Points |
+|---|---|---|
+| 3 cards | Tierce | **20** |
+| 4 cards | Quarte | **50** |
+| 5 cards | Quint | **100** |
+
+- **Sequence order for runs** (verified): **A, K, Q, J, 10, 9, 8, 7**. This is the natural order, different from the trick order. Examples: J-Q-K is a valid Tierce; 10-J-Q-K-A is a Quint.
+- When the highest card of a run is the **Ace**, it is called **Major** (Major Tierce, Major Quarte, Major Quint).
+- When both players have a run, **the one with more cards wins**. If the number of cards is equal, **the one that starts with the highest card wins**. If the two runs are completely equal, **the trump suit wins**. If neither is in trumps, **the one declared first wins** (the "hand" declares first).
+- A run longer than a Quint (6 or 7 cards) has **no extra value**: it counts as a Quint (100).
+- An **8-card run** counts as **a Quint (100) plus a Tierce (20) = 120**.
+- **The value of a run is not counted when the other player holds a Brelan, whatever that Brelan is.**
+- Several runs in different suits (or separate runs in the same suit) are possible. They are all declared in the same turn.
+
+**C. Belote**: holding the **king and queen of the trump suit**. Worth **20**.
+If a run made of trump cards contains both the king and the queen, **the Belote is also counted** (on top of the run).
+
+### 4.9 Declaring combinations
+- After receiving the 3 additional cards (and after any seven exchange), each player examines their nine cards.
+- The **"hand" declares first**, **before** playing the first card of the tricks.
+- The opposing player then declares only combinations that are **higher** than those declared by the "hand". Otherwise they simply say **"Good"**. (A "Good" means their lower combinations score nothing.)
+- Declarations are made **by the name of the combination only** (for example "Brelan", "Tierce", "Quarte", "Quint"), **never by the value in points**.
+- Order of declaring: **first the Brelan, then the run** (Quint, Quarte or Tierce).
+- When a declaration is **accepted as valid** by the opponent, the declarer must **show the declared cards**, but **only after each player has put their first card on the table (the first trick)**. The server therefore validates the claim immediately, and reveals the cards to everyone after the first trick completes. The UI shows the revealed cards in a small panel next to the declarer.
+- **Belote is not declared at this moment** (see 4.10).
+
+### 4.10 Belote and Rebelote
+- When a player plays the **king of trumps** in a trick they must say **"Belote"**.
+- When they play the **queen of trumps** in **another** trick they must say **"Rebelote"**. This applies whoever wins those tricks (the holder or the opponent).
+- **Failing to say either word means the holder does not add the 20 points.**
+- Implementation: when the player plays the K or Q of trumps while holding the pair, the UI shows a small prompt with a **"Belote!" / "Rebelote!"** button. The `playCard` event carries `announce: true/false`. A client preference **"Auto-announce Belote"** (default **on**) removes the extra click for people who do not want the risk. Bots always announce.
+- The 20 points are scored for the holder even if the same king and queen are part of a run and even if the player lost the declaration comparison. The Belote is **independent** of the Brelan/run comparison.
+
+### 4.11 Trick-taking
+- The **"hand"** starts by placing a card face up. The opponent plays whatever card suits them best on top of it.
+- **It is obligatory to follow the suit led.** Additionally, **when trumps are led, the player must also play a higher trump if they can** ("place as well as match the trump suit").
+- **If a player cannot follow suit, they do not have to play a trump.** They may play any card.
+- Trick winner: the highest trump if any trump was played, otherwise the highest card of the led suit (using the orders in 4.4).
+- **The winner of a trick leads the next trick.**
+- If a player wins **no trick**, the opponent **declares Capot** and receives the premium points (see 4.14).
+- A 2-player hand has **9 tricks** (9 cards each). 3-player and 4-player hands have **8 tricks** (8 cards each).
+
+### 4.12 Ending a hand early and ending the game
+
+**A partial game (hand) ends when all the cards have been played.** The server then totals the points.
+
+**"I have finished" (early stop):**
+- Either player can interrupt a hand when they believe they already have enough points to **win the whole game** (reach the target), by saying **"I have finished"** (digital: a button **"I have finished"**).
+- If they are **right**, they win the game.
+- If they are **wrong** and lack the points, **they lose the game, and the opponent wins, even if the opponent has a lower score.**
+- **Not allowed** unless the player has **won at least one trick in this hand that contains one or more cards of value**. (Until then, the Jack and nine of trumps and the combinations cannot be counted in their favour.)
+- **Not allowed when only one trick is left to play.**
+- Points counted for the check: the match score + accepted combinations + points of cards in tricks the player has won so far + Belote if both words were already said. (Prizes for last trick and Capot are not available mid-hand.)
+
+**The game can also end without an interruption:** after a hand is totalled, if one or more players have **reached or exceeded the target**, the game ends and **the highest score wins**. If they are tied at the top, play another hand.
+
+### 4.13 Scoring tables
+
+**Combinations**
+
+| Combination | Points |
+|---|---|
+| 4 jacks | 200 |
+| 4 nines | 150 |
+| 4 aces / 4 tens / 4 kings / 4 queens | 100 each |
+| Quint | 100 |
+| Quarte | 50 |
+| Tierce | 20 |
+| Belote | 20 |
+
+**Prizes**
+
+| Prize | Points |
+|---|---|
+| Declare Capot | **100** |
+| Win the last trick | **10** |
+| Not playing the correct suit when it was possible: **the others receive** | **10** |
+
+**Note:** when a player declares Capot, they **cannot add the 10 points for the last trick**.
+
+### 4.14 How a finished hand is totalled (strict order)
+1. The value of the **combinations declared and accepted** (and the Belote, if announced properly).
+2. The value of the **cards in the tricks won** (only cards with a real value are counted).
+3. The value of the **prizes**, if any (last trick 10, or Capot 100 instead of the 10).
+4. **Penalties** are deducted from the previous total.
+
+**The number of tricks won has no influence on the score.** Only cards with real value are counted.
+**Capot:** the player who wins every trick gets +100 (no +10 for the last trick) on top of all the card points of the tricks.
+If played in pairs, **the score is the same for both partners**.
+
+### 4.15 Penalties (points subtracted from the offender)
+
+| Mistake | Penalty |
+|---|---|
+| Make a mistake when dealing the cards | 10 |
+| Reveal more than one card on the deck | 10 |
+| Forget to return the last card of the deck after dealing the three complementary cards | 10 |
+| Playing or declaring hands when it is not your turn | 10 |
+| Placing the card badly for a trick | 10 |
+| Stacking the cards of the trick | 10 |
+| Not showing the cards of a combination that has been accepted as valid | 10 |
+| Not playing the correct suit when it was possible (the others receive the 10 prize) | 10 prize to the others |
+
+**Digital mapping (implement this mapping exactly in `penalties.js`):**
+- The server deals, shuffles, turns cards and returns the last card automatically, and it places and shows cards itself. So the dealing, deck, card-placement, stacking and card-showing penalties **cannot occur**. Still, define all penalty codes and their value (10) in `penalties.js` with a function `applyPenalty(score, code)`, covered by unit tests.
+- **Illegal suit:** the server **blocks illegal cards**, so it cannot happen. Keep the prize rule in `scoring.js` (10 points to the others), covered by a unit test, and used if `RULES.allowIllegalPlayWithPenalty` is turned on (default off).
+- **Out-of-turn play/declaration:** the server rejects it. If `STRICT_PENALTIES=true` (default **false**, so lag does not punish anyone) the offender also loses 10.
+
+### 4.16 Four players (pairs)
+- Partners sit **opposite** each other (seats 0 and 2 against seats 1 and 3). Digital version: seating is random when the match starts. The host can press "Shuffle seats" in the lobby. The "four sequential cards" draw is shown as a short animation: the highest card is the **"hand"**, the lowest deals.
+- The dealer deals **5 cards to each player in two passes (3 then 2)**, then turns the **next card face up** to establish the trump suit.
+- The **"hand"** (the player to the right of the dealer) chooses between **passing** or **beginning the game** (accepting the turned-up trump). If the hand passes, the other players have the same option **in turn, passing to the right**.
+- If **all four pass**, the "hand" can **choose the trump suit** (any suit); if the hand passes again, the other players in turn can choose it. If all pass again, the cards are **dealt again**.
+- When someone chooses trumps: **three more cards** are dealt to each player, **starting with the player to the right of the one who chose trumps**. The player who takes the turned-up card receives only **two** cards (see 4.19, D5). Everyone then has **8 cards = 8 tricks**.
+- The first-turn acceptance conditions for the turned card are as in 4.7, adapted by D5.
+- **Scoring is shared by partners.** Declarations: the team whose player holds the best declaration scores its declarations (see 4.19, D6).
+- Direction of play: **to the right (counter-clockwise)**.
+
+### 4.17 Three players
+The supplied text only says that 3 players play individually. The adaptation to use is in 4.19, D7.
+
+### 4.18 Verification notes (research results)
+
+I cross-checked the supplied rules against Pagat (John McLeod's card game site), Wikipedia and several rule sets. Findings:
+
+| Topic | Result |
+|---|---|
+| Card order (trump J-9-A-10-K-Q-8-7, others A-10-K-Q-J-9-8-7) | **Confirmed** |
+| Trump values J 20, 9 14, A 11, 10 10, Q 3; side suits A 11, 10 10, Q 3, J 2 | **Confirmed** |
+| **King value** | **Conflict.** The supplied text says 10. Pagat, Wikipedia and other sources say **4**. **Default 4**, host switch to 10 |
+| Brelan values (J 200, 9 150, A/10/K/Q 100, no value for 8s and 7s) | **Confirmed** |
+| Run values 20 / 50 / 100, runs longer than 5 count as 5, run order A-K-Q-J-10-9-8-7 | **Confirmed** (the 8-card = 120 line comes from the supplied text) |
+| Belote 20, independent of other declarations | **Confirmed** |
+| Only the best declaration scores, the other side scores none of its combinations | **Confirmed** |
+| Last trick 10; Capot replaces it with 100 | **Confirmed** |
+| Play and deal direction is counter-clockwise | **Confirmed** |
+| Taker receives the turned-up card and only 2 more cards | **Confirmed** as standard. The supplied text words it as "the player to the right of the chooser", which looks like a translation slip |
+| Trumping obligations when you cannot follow suit | **Variant.** Standard French rule: you must trump (unless your partner is winning). The supplied text says no trump is needed. **Default: supplied text.** Optional host switch "Standard French trumping" |
+| Brelan/run interplay and 3-player rules | Not fully specified in the supplied text. See decisions D3 and D7 |
+
+### 4.19 Resolved decisions (use these, do not ask)
+
+| # | Topic | Decision |
+|---|---|---|
+| D1 | **King points** | Default **4**. Lobby setting `kingPoints: 4 | 10`. 10 reproduces the supplied text exactly |
+| D2 | **Who sets trump in the first turn** | The first player to **accept** fixes the trump. The other player is bound by it. In 2-player the hand answers first, then the dealer |
+| D3 | **Declaration comparison** | (a) If any Brelan was declared, the side with the highest Brelan wins the declaration phase and scores **all its own Brelans**. Every other side scores **no Brelan and no run**. (b) The winner also scores its own runs, **unless an opponent also held a Brelan**, because a run is void when an opponent holds a Brelan (4.8 B). (c) If nobody declared a Brelan, compare the **best run** (rules in 4.8 B). The winner scores **all of its own runs**, the others score no run. (d) Belote is always scored separately by its holder. (e) A card may take part in more than one combination (for example a jack in a Brelan and in a run) |
+| D4 | **Seven exchange timing** | Offered **right after the extra cards are dealt and before declarations**. Only when final trump suit equals the suit of the **first turned-up card**, only in **2-player** games, only to the holder of the **seven of trumps**. A prompt "Swap your 7 with the turned card?" appears for 15 seconds, and bots decide instantly |
+| D5 | **Turned-up card in 3 and 4 player games** | The player who **chooses trump takes the turned-up card** and gets only 2 extra cards. Extra cards are dealt starting from the player to the right of the chooser. The seven exchange does not exist in these modes |
+| D6 | **Declarations with partners (4 players)** | Declare in turn from the hand to the right. The side with the best declaration scores **all valid declarations of both partners**. The other side scores none. Belote is scored by the holder's side |
+| D7 | **3 players** | Everyone for themselves. Deal 5 (3+2), turn a card, same trump choice flow as 4 players (to the right, then a second round), chooser takes the turned card and gets 2 more cards, others get 3. **8 cards each, 8 tricks**. 8 cards stay unused. No seven exchange. Declarations compare as in D3 across all three players. Everyone scores their own points |
+| D8 | **Round-2 suit choice** | Any of the four suits may be named (the supplied text says "any suit") |
+| D9 | **Dealer after a hand** | Player with the highest hand score deals next (tie: alternate). In pairs: next dealer is the next seat to the right of the previous dealer, from the side that scored more (if tie, simply the next seat to the right) |
+| D10 | **Game tie at the target** | If tied for the highest score at or over the target, play another hand |
+| D11 | **Hand size in 2-player** | 9 cards each, **9 tricks**. The remaining 12 cards of the deck stay unused |
+| D12 | **Total check for "I have finished"** | Exactly as in 4.12. The result is decided by the server, and the button is hidden when not allowed |
+
+---
+
+## 5. GAME ENGINE (`server/game/HandEngine.js` and `Match.js`)
+
+The engine is a **deterministic state machine** with no knowledge of sockets. It takes *actions* from a seat and returns *events* plus a new state. The same API is used by humans, bots and the autopilot.
+
+### 5.1 Phases of one hand
+
+```
+CUT_FOR_DEAL (first hand only)
+  -> DEAL_FIRST        (6 cards in 2P, 5 cards in 3P/4P) + turn up trump card
+  -> BID_ROUND_1       (accept | pass) in turn
+  -> BID_ROUND_2       (choose suit | pass) in turn         [only if all passed]
+  -> REDEAL            (everybody passed twice) -> back to DEAL_FIRST, dealer rule 4.5.6
+  -> DEAL_SECOND       (3 more cards, 2 for the taker in 3P/4P) + dead "guide" card in 2P
+  -> SEVEN_SWAP        (2P only, if rule D4 applies)
+  -> DECLARE           (hand first, then in turn: names only, or "Good")
+  -> TRICKS            (first trick, then reveal accepted declarations, tricks 2..N)
+  -> HAND_SCORING      (strict order of 4.14)
+  -> MATCH_CHECK       (target reached? winner? else next dealer and back to DEAL_FIRST)
+  -> MATCH_OVER        (Play again | Exit room)
+```
+
+`FINISH_CALL` can interrupt `TRICKS` at any moment that is allowed by 4.12.
+
+### 5.2 Engine API (all pure and unit-testable)
+
+```js
+engine.getView(seatId)                   // redacted, personal view (see 5.3)
+engine.act(seatId, action)               // throws RuleError(code, message) if illegal
+// actions:
+{ type: 'bid.accept' } | { type: 'bid.pass' } | { type: 'bid.choose', suit }
+{ type: 'swap7', doSwap: true|false }
+{ type: 'declare', names: ['BRELAN','QUINT'...] } | { type: 'declare', good: true }
+{ type: 'play', card: 'JH', announce: true|false }
+{ type: 'finish' }                       // "I have finished"
+// the engine returns: { events: [...], state, needsActionFrom: seatId|null }
+```
+
+### 5.3 Personalised view (`views.js`)
+- Each player only receives **their own cards**. For others only the **number of cards**.
+- Always include: phase, version counter, dealer seat, hand seat, current seat, trump suit, turned-up card (and the dead guide card in 2P), current trick, tricks won count, **legal cards for me** (`legalCards`), my possible actions, declarations announced (names only) and **revealed declarations after trick 1**, match scores, hand score preview, target score, per-seat info (name, isBot, difficulty badge, aggression badge after start, connection state, `autopilot` flag, countdown seconds when disconnected).
+- **Never** include other players' hands, the undealt deck or bot internals.
+- Bots receive exactly the same personalised view that a human in that seat would get (they **cannot cheat**).
+
+### 5.4 Events (for animations and the log)
+`dealt`, `trumpTurned`, `bid`, `trumpSet`, `deadCardPlaced`, `sevenSwapped`, `declared`, `declarationsRevealed`, `cardPlayed`, `beloteCalled`, `rebeloteCalled`, `trickWon`, `handScored`, `finishCalled`, `matchOver`, `redeal`.
+
+---
+
+## 6. ROOMS, CODES AND SOCKETS
+
+### 6.1 Room codes (`codeGenerator.js`)
+- Exactly **5 characters**, letters and digits, **always UPPERCASE**.
+- Generate with `crypto.randomInt` from the alphabet `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (no look-alikes such as 0/O and 1/I/L). **Validation accepts any `[A-Z0-9]{5}`**.
+- Guarantee uniqueness against live rooms (retry on collision).
+- `normalizeCode(input)`: `String(input).trim().toUpperCase().replace(/[^A-Z0-9]/g, '')`, then check length 5. **Use it everywhere**: the join form, the URL parameter, the socket handlers, the REST endpoint. This unifies the code and cannot break the logic when users type lowercase.
+- On the client, the input field must: force uppercase while typing (JS `input` handler plus the CSS class `uppercase`), strip spaces and symbols, handle paste, `maxlength=5`, `autocapitalize="characters"`, `autocomplete="off"`, monospace font with wide letter spacing.
+
+### 6.2 Invite link
+- Format: `https://<host>/?room=ABC12` (also accept `/r/ABC12` through `spaFallback.js`).
+- Opening the link shows the **Join screen** with the code **pre-filled** (uppercase) and the cursor in the name field. After typing the name and pressing Join, the player enters the lobby of that room. If the room does not exist, is full, or already started, show a friendly error with a button to the main menu. (Use `/api/room/:code/exists` to check before connecting.)
+- If the user already has a saved session for that room, offer **"Rejoin your seat"**.
+
+### 6.3 Sessions and identity (`session.js`)
+- On first join the server issues `{ playerId, token }`. The client stores them in `localStorage` (`belote.session` = `{ code, playerId, token, name }`).
+- A player is identified by `playerId`, **not by socket id**. A socket can die and come back with a new id.
+- Only **one active socket per player**. If a second socket authenticates with the same token, the old socket receives `session:replaced` and is disconnected.
+- Token comparison uses `crypto.timingSafeEqual`.
+
+### 6.4 Socket events
+
+Every client event uses an **acknowledgement**: `ack({ ok: true, ...data })` or `ack({ ok: false, error: 'CODE', message: '...' })`.
+Every action carries a client-generated `actionId` so a resend after a flaky connection is **idempotent** (the server remembers the last 50 action ids per player).
+
+**Client to server**
+
+| Event | Payload | Who | Notes |
+|---|---|---|---|
+| `room:create` | `{ name, settings? }` | anyone | returns `{ code, playerId, token }`, caller becomes host |
+| `room:join` | `{ code, name }` | anyone | code normalised; errors: `ROOM_NOT_FOUND`, `ROOM_FULL`, `GAME_IN_PROGRESS`, `NAME_TAKEN` |
+| `room:rejoin` | `{ code, playerId, token }` | returning player | restores seat and cancels the disconnect timer |
+| `room:leave` | `{}` | member | in lobby removes the seat; in game turns the seat into a bot (autopilot) |
+| `lobby:addBot` | `{}` | host | max 4 seats total; bot gets random unique name and random difficulty |
+| `lobby:removeBot` | `{ botId }` | host | |
+| `lobby:updateSettings` | `{ targetScore, kingPoints, strictTrumping }` | host | only before start |
+| `lobby:shuffleSeats` | `{}` | host | 4-player pairs |
+| `game:start` | `{}` | host | needs 2 to 4 seats |
+| `game:bid` | `{ actionId, action: 'accept'|'pass'|'choose', suit? }` | current seat | |
+| `game:swap7` | `{ actionId, doSwap }` | the 7 holder | |
+| `game:declare` | `{ actionId, names?: [...], good?: true }` | current seat | |
+| `game:play` | `{ actionId, card, announce }` | current seat | |
+| `game:finish` | `{ actionId }` | any eligible seat | "I have finished" |
+| `game:playAgain` | `{}` | each human | vote; bots always agree |
+| `room:exit` | `{}` | any | leave after game over |
+| `client:resync` | `{}` | any | asks for a fresh full state |
+
+**Server to client**
+
+| Event | Payload |
+|---|---|
+| `room:state` | lobby snapshot: code, host, seats (name, isBot, difficulty, connected), settings, inviteUrl |
+| `game:state` | the personalised view with a **monotonic `version`** |
+| `game:event` | one event of 5.4 (for animations; never the source of truth) |
+| `player:disconnected` | `{ playerId, graceEndsAt }` |
+| `player:reconnected` | `{ playerId }` |
+| `player:autopilot` | `{ playerId, on: true|false }` |
+| `session:replaced` | `{}` |
+| `room:closed` | `{ reason }` |
+
+**Robust-state rule:** after every state change the server emits the fresh personalised `game:state` to each member. Events are only for animation, so a missed event never corrupts the screen. The client ignores any state with a `version` lower than the one it already has.
+
+### 6.5 WebSocket reliability checklist ("must work perfectly")
+- Socket.IO server options: `transports: ['websocket','polling']`, `pingInterval: 10000`, `pingTimeout: 10000`, `maxHttpBufferSize: 1e5`, CORS from env.
+- Client: `io({ transports: ['websocket','polling'], reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 500, reconnectionDelayMax: 5000, timeout: 10000 })`.
+- On every `connect` (including reconnects) the client **automatically calls `room:rejoin`** if a saved session exists, then the server pushes the full state.
+- Show a non-blocking banner **"Reconnecting..."** while offline, and "Back online" when fixed.
+- Handle `visibilitychange` and `online` browser events by calling `client:resync`.
+- Every ack has a **5 s timeout**. On timeout, retry the **same `actionId`** up to 3 times.
+- A per-socket **rate limiter** (for example 30 events per 5 seconds) protects the server.
+- Validate every payload (type, length, enum). Names: 1 to 16 characters, trimmed, HTML-escaped on render (use `textContent`, never `innerHTML` for user text).
+- Proxy notes in the README: enable WebSocket upgrade headers (Nginx `Upgrade` and `Connection`), sticky sessions if scaling beyond one process (the default is a single process, rooms in memory).
+- `server/index.js` handles `SIGTERM`: stop accepting rooms, notify clients with `room:closed`, close cleanly.
+
+### 6.6 Lobby behaviour
+- Host is the creator. If the host leaves or is lost beyond the grace period, **host passes to the next human** (join order). If no human remains, destroy the room after 5 minutes.
+- 4 seats max (humans + bots). `lobby:addBot` is rejected when full.
+- Start button is enabled with 2 to 4 seats.
+- Late joiners cannot join a game in progress, unless they are the returning owner of a seat (`room:rejoin`).
+
+---
+
+## 7. DISCONNECT HANDLING AND AUTOPILOT (`DisconnectManager.js`)
+
+1. When a human's socket drops, mark the seat **`connected: false`** and emit `player:disconnected` with `graceEndsAt = now + RECONNECT_GRACE_MS`.
+2. `RECONNECT_GRACE_MS` default **120000 (2 minutes)**. Allowed range 60000 to 120000. It is read from `config.js` (env `RECONNECT_GRACE_MS`) so tests can shorten it.
+3. **While waiting:** the game keeps running. If it is the missing player's turn, **the game waits** (all players see a "Waiting for X to come back... 1:42" countdown on that seat).
+4. **If the player returns before the deadline** (`room:rejoin`): cancel the timer, mark connected, emit `player:reconnected`, push full state. They continue as if nothing happened.
+5. **If the deadline passes:** attach the **Autopilot** (`bots/autopilot.js`) to that seat:
+   - It uses the **Expert** strategy with a balanced aggression, so the game is not damaged by the absence. In 3P and 4P games it plays to help its partner or its own score as normal.
+   - The seat shows an "Auto" badge and the name stays the same (for example "Mira (auto)").
+   - Emit `player:autopilot { on: true }` and a toast to everyone.
+   - If the missing player was **mid-decision**, the autopilot decides now.
+6. **Coming back later:** if the human rejoins after autopilot started, they **take control back at their next decision point** (never in the middle of a decision made by autopilot). Show them "Welcome back, you take over on your next turn".
+7. A human who explicitly clicks **Exit** during a game is treated as "gone for good": the seat becomes autopilot immediately and keeps the name with "(auto)". Their score stays in the match.
+8. A seat in the **lobby** (before the game starts) is simply removed after the grace period.
+9. If **all humans** are disconnected longer than 10 minutes, destroy the room.
+10. Timers live in the `DisconnectManager`, never in the pure game code. Use injected clocks so tests run fast.
+
+---
+
+## 8. BOTS
+
+### 8.1 Names (`botNames.js`): exactly these 15
+`Lucky Luka`, `Big Boris`, `Slick Sasha`, `Vegas Vera`, `Mira the Dealer`, `Jack Spade`, `Queenie`, `Diamond Dimo`, `Ruby Red`, `Captain Kiki`, `Tsveti Aces`, `Nikola Noir`, `Zara Joker`, `Old Man Misho`, `Boyan Bluff`
+
+- `BotFactory` picks a **random unused name** for each added bot (no duplicates in one room, and no clash with a human name; if a human uses the same name, the bot name gets a suffix).
+- It picks a **random difficulty** from `medium`, `high`, `expert` (equal chance).
+- Lobby shows each bot with its name and difficulty badge (Medium, High, Expert).
+
+### 8.2 Aggression
+- When the **game starts** (`game:start`, and again for a "Play again" match), every bot gets a **random aggression** value from 0 to 100, kept for the entire match. Labels: 0-33 **Cautious**, 34-66 **Balanced**, 67-100 **Aggressive**. Show the label as a small badge on the seat once the game starts.
+- Aggression changes decisions through `aggression.js` (single place), for example:
+  - Trump acceptance threshold (aggressive accepts weaker hands).
+  - How early it leads trumps and how often it fights for the last trick (10 points).
+  - How much it chases Capot.
+  - How bold it is with "I have finished" (only when 100% sure; aggression never makes it wrong).
+  - In the Expert search, the aggression bends the risk preference (variance-seeking versus safe).
+
+### 8.3 Difficulty levels (`strategies/`)
+
+| Level | How it thinks |
+|---|---|
+| **Medium** (`medium.js`) | Rule-based. Scores its hand for trump (jack, nine, aces, count of trumps). Follows suit correctly, plays the lowest winning card or throws the lowest card. Declares everything it holds. **No card counting.** About 10% of its choices are slightly sub-optimal on purpose |
+| **High** (`high.js`) | Everything above, plus **card counting** (BotMemory knows what was played, the turned and dead cards), **void inference** (if a player did not follow suit, they are out of that suit), trump control (leads J/9 when strong, draws trumps), wins high-value tricks, ducks worthless ones, plans the last trick (10 points) and avoids wasting the Belote king/queen |
+| **Expert** (`expert.js`) | Everything above, plus **determinised Monte-Carlo search (PIMC)**: it samples many possible deals of the unseen cards that are **consistent** with the known voids, known cards and revealed declarations, plays each deal out with the High policy, and picks the card with the best average result, counting combinations, Belote, Capot and last-trick bonus. Also match-aware: when close to the target it plays for the points it needs |
+
+**Performance rule:** a bot's decision may use at most **~250 ms** of CPU (configurable in `config.js`), sliced with `setImmediate` or run in a `worker_threads` pool so the Socket.IO event loop never stalls. If time runs out, return the best result so far.
+
+### 8.4 Bot controller (`BotController.js`)
+- Subscribes to the engine's `needsActionFrom` and, if the seat belongs to a bot, waits a **human-like delay** (700 to 1600 ms, random) then acts.
+- Uses the **same `engine.act` API** as a human. No back doors.
+- Bots always say "Belote" and "Rebelote", declare their combinations correctly, answer the seven swap sensibly, and use "I have finished" only when the server-side check would pass.
+- The **autopilot** (Section 7) is the same controller using the Expert strategy.
+
+---
+
+## 9. FRONT END (TAILWIND 3.4.17 + DAISYUI 4.12.24)
+
+### 9.1 Look and feel: a cool casino scene
+- Dark, moody room: near-black burgundy background with a soft spotlight, subtle vignette and a few floating gold sparkles (pure CSS).
+- **The table:** a rounded oval **green felt** (radial gradient from `#0f7a4a` in the centre to `#064a2c` at the edges, with a fine noise texture), a padded **dark wood rail** around it, and a thin **gold inlay line**. Soft inner shadow, so the felt looks sunken.
+- Neon-style title **"BELOTE"** on the main menu (gold glow, slight flicker animation, respecting `prefers-reduced-motion`).
+- Poker-chip decorations (CSS circles with dashed borders) used as score markers and buttons accents.
+- Define a custom daisyUI theme named `casino` in `tailwind.config.js` (primary gold `#d4af37`, secondary burgundy `#7a1230`, accent emerald `#10b981`, base dark `#14090d`, neutral dark wood). Set it with `data-theme="casino"`.
+- Fonts: a serif display font for titles (for example "Cinzel") and a clean sans (for example "Inter"), loaded from Google Fonts with system fallbacks.
+- Fully **responsive** (phone portrait, tablet, desktop). Card size is driven by a CSS variable (`--card-w`) so the hand fits on small screens (fan the hand and let it overlap).
+
+### 9.2 Screens and flow
+
+**A. Main menu (`menuScreen.js`)**
+1. Big neon title and a short tagline.
+2. **"RULES" button, visible BEFORE the player writes a name or creates/joins anything.** It opens a modal (`rulesModal.js`) with the **complete rules** from Section 4 in plain, friendly language (tabs: *Goal and cards*, *Dealing and trump*, *Combinations*, *Playing tricks*, *Scoring and penalties*, *2 / 3 / 4 players*, *FAQ*). Content lives in `rulesContent.js`. The same Rules button is also available in the lobby and during the game.
+3. **Name input** (1 to 16 characters, remembered in `localStorage`).
+4. **"Create room"** button and **"Join with code"** area (the code input follows 6.1: auto-uppercase, 5 characters).
+5. Footer (9.6).
+
+**B. Join screen (`joinScreen.js`)**: shown when the user arrives by invite link or presses "Join". Shows the room code (uppercase) and a name field. Friendly errors for unknown, full or started rooms.
+
+**C. Lobby (`lobbyScreen.js`)**
+- At the top: a small label **"ROOM"** and, big beneath it, the **room code in uppercase** with a copy-code button. (So that someone who is in the Join screen can read it and type it.)
+- **Directly under the code: the invite link** in a read-only field, with a **"Copy invite link"** button. It shows "Copied!" feedback. The link, when clicked, takes the person straight to that room's Join screen with the code filled in.
+- The lobby must have these actions: **Invite** (copy link, plus the native share sheet on mobile through `navigator.share` when available), **Add bot** (host only, disabled at 4 seats, shows the random name and difficulty it got), **Exit** (leave the room, with a confirm dialog).
+- Also: **Rules** button, **Start game** (host only, enabled with 2 to 4 seats), remove-bot button on each bot seat, host crown, connection dots, a settings panel for the host (target score, king value 4/10, standard French trumping on/off, shuffle seats for 4 players).
+- The seat list animates when someone joins or leaves. It shows which game mode will be played: "2 players: head to head", "3 players: every player for themselves", "4 players: pairs".
+
+**D. Game screen (`gameScreen.js`)**
+- Table with seats around it (me at the bottom; others rotated relative to me). Each seat shows avatar, name, bot difficulty/aggression badge (after start), dealer chip "D", hand marker, card count, connection state, "Auto" badge and the reconnect countdown.
+- **Centre:** the trick area, the **turned-up card** (and the **dead guide card** in 2-player), and a **trump badge** (suit symbol on a gold chip).
+- **My hand** at the bottom: legal cards lift on hover, illegal cards are dimmed and not clickable during my turn, trump cards have a faint gold edge.
+- **Action bar** (context-aware, daisyUI buttons): *Accept trump* / *Pass* / *Choose suit* (four suit buttons), *Swap my 7*, *Declare* (checkbox list of my declarable combinations by name, plus **Good**), *I have finished* (only shown when allowed by 4.12, with a confirm modal that warns about the risk), *Belote!* / *Rebelote!* prompt.
+- **Scoreboard** (collapsible panel): match score per player/team, target score, hand-by-hand history, and the live breakdown of the current hand (combinations, card points, prizes).
+- **Revealed declarations panel** after the first trick.
+- **Message log** (short, newest first), toasts for key events ("Boris declared a Quarte", "Mira is back online", "Kiki is now on autopilot").
+- **Hand result overlay:** a breakdown in the strict order of 4.14 (combinations, cards, prizes, penalties) with count-up animation, then "Next hand".
+- **Match over overlay:** winner announcement with confetti (CSS), final scores, and two buttons: **"Play again"** and **"Exit room"** (9.5).
+
+### 9.3 Animations
+- Card dealing (cards fly from the deck), card played to the centre, trick sweep to the winner, trump chip pop, score count-up. Keep them short (150 to 400 ms) and skip them when `prefers-reduced-motion` is set.
+- Animation is driven by `game:event`. The screen itself is always rendered from the latest `game:state`.
+
+### 9.4 Card design (very important)
+Render each card in `cardRenderer.js` as a **portrait card with rounded corners, an ivory face and a thin border**, with this exact layout:
+
+1. **Top-left corner:** the **rank** (7, 8, 9, 10, J, Q, K, A) and, **directly under it, the small suit symbol**.
+2. **Centre of the card:** one **large suit symbol** (for J, Q, K draw it inside a thin gold ring so face cards are distinct, the Ace uses the biggest symbol).
+3. **Bottom-right corner:** the **same corner mark mirrored, i.e. rotated 180 degrees**, so it reads upside down: the **suit symbol on top and the rank under it** (this is the top-left mark turned around).
+4. Suits **hearts and diamonds in red** (`#c1121f`), **spades and clubs in near-black** (`#111`). Draw the suit symbols as inline **SVG** (not font glyphs) so they look identical on every device.
+5. **Card back:** burgundy with a gold diamond lattice and a small crest in the centre.
+6. States: *playable* (lift + glow), *disabled* (dim), *trump* (gold edge), *selected* (raised). Provide accessible `aria-label`s such as "Jack of hearts".
+7. Cards must be crisp at all sizes (vector only, no raster images).
+
+### 9.5 Play again or exit
+When the match is over, every player sees **"Play again"** and **"Exit room"**.
+- **Play again** is a vote: it turns into "Waiting for others (2/3)". When every human has voted (bots always agree), a **new match starts in the same room** with the same seats, fresh scores, new random bot aggression, and the loser of the cut or the usual dealer rule deals first.
+- **Exit room** leaves the room and returns to the main menu. The others continue. If fewer than 2 seats remain, the room returns to the lobby so the host can add bots or invite people.
+
+### 9.6 Footer (on every screen)
+A slim footer: **"Created by Jewel"** plus a **GitHub link** (icon and text, opens in a new tab with `rel="noopener noreferrer"`). The URL comes from `GITHUB_URL` in `config.js` and `.env`. Use the placeholder `https://github.com/YOUR-USERNAME/belote` and mention in the README that it must be replaced. On the game screen the footer is small and unobtrusive.
+
+---
+
+## 10. SAFETY, FAIRNESS AND QUALITY
+- **Server authority:** all moves are validated against the engine. The client can never set state.
+- **No hidden-information leaks:** run a test that scans every outgoing payload for cards that do not belong to the receiver.
+- **Fair randomness:** shuffle with a Fisher-Yates algorithm on `crypto.randomInt`. Keep a seedable path for tests.
+- **Input safety:** validate and sanitise all input. Render user text with `textContent`.
+- **Clean code:** JSDoc on public functions, small functions, no global mutable state outside `RoomManager`.
+- **Accessibility:** keyboard play (arrow keys to pick a card, Enter to play), visible focus rings, high contrast text, ARIA live region for turn changes.
+- **Logging:** structured logs for room create/join/leave/disconnect/autopilot. No logging of tokens or hands.
+
+---
+
+## 11. TESTS TO WRITE (and make pass)
+
+**Rules (unit)**
+- Card order and points for trump and non-trump (with `kingPoints` 4 and 10).
+- Brelan detection and values (J 200, 9 150, A/10/K/Q 100, 8s and 7s none). Higher Brelan beats lower.
+- Runs: Tierce/Quarte/Quint detection with the order A-K-Q-J-10-9-8-7. A 6 or 7-card run counts as 100. An **8-card run = 120**. Separate runs in one suit. "Major" naming.
+- Run comparison: longer wins, then higher top card, then trump suit, then first declarer.
+- Run void when the opponent holds a Brelan (and decision D3).
+- Belote detection, including inside a trump run, and the **announce rule** (no "Belote"/"Rebelote" means no 20 points).
+- Legal moves: follow suit, must go higher when trumps are led, free play when void (default), and standard French trumping when that option is on.
+- Trick winner with and without trumps.
+- Scoring order of 4.14, last-trick 10, **Capot 100 with no extra 10**, penalties subtract, illegal-suit prize.
+- "I have finished": eligibility rules (needs a valued trick, not with one trick left), correct call wins, wrong call loses even with a lower opponent score.
+- Dealer rotation (highest score deals, tie alternates, double pass makes the non-dealer deal).
+- Seven exchange only when allowed (trump equals the first turned card's suit, 2-player only).
+
+**Engine flow**
+- Full 2P, 3P, 4P hands from deal to scoring with fixed seeds. Card conservation (no card duplicated or lost). Redeal when everyone passes twice.
+
+**Bots**
+- `simulate`: run **1,000 bot-only matches** per mode (2, 3, 4 players) with mixed difficulties. No exceptions, no illegal moves, every match ends. Expert must beat Medium clearly over a large sample (report win rates).
+- Bot decision time stays under the budget.
+
+**Rooms and sockets (integration with `socket.io-client`)**
+- Codes: always 5 uppercase chars, lowercase input is accepted and normalised, uniqueness.
+- Create, join with code, join by link, room full, game in progress, name taken.
+- Host adds and removes bots (max 4 seats), random names unique.
+- Disconnect and **reconnect inside the grace period** keeps the seat. **No return after the grace period** (use a short test timer) makes the autopilot play. Later return takes control back at the next decision.
+- Host migration. Room cleanup.
+- Duplicate `actionId` is applied once. Rate limiter works. No payload leaks another player's cards.
+
+---
+
+## 12. ACCEPTANCE CRITERIA (the finished product must satisfy ALL)
+
+1. Node + Express server, Socket.IO realtime, front end with **Tailwind 3.4.17** and **daisyUI 4.12.24** (pinned).
+2. Each logical part is in **its own file** as in Section 3.
+3. I can create a room, get a **random 5-character uppercase code** and a **copyable invite link**; anyone opening the link lands on Join with the code pre-filled.
+4. The lobby shows **ROOM + CODE on top, the invite link under it**, and has **Invite, Add bot, Exit** (plus Start, Rules, settings).
+5. The main menu has a **Rules** button available **before** entering a name or creating/joining.
+6. I can add **up to 3 bots**, mixed with invited humans, **4 seats maximum**. Each bot gets a **random name from the 15** and a **random difficulty (Medium, High, Expert)**. Each gets a **random aggression** at game start.
+7. Game modes by player count: 2 (head to head), 3 (individual), 4 (pairs).
+8. All rules of Section 4 are implemented, including: card orders and values, dealing, trump rounds and redeal, the second 3-card deal, dead guide card, seven exchange, Brelan, runs (3/4/5, 6-7 = Quint, 8 = 120), Belote with the announce requirement, declaration order and "Good", reveal after first trick, trick rules, Capot, last trick, "I have finished" (both outcomes), scoring order, penalties table, target score default 1,000.
+9. Card design: **centre symbol, top-left rank with suit under it, bottom-right the same mirrored (rotated 180 degrees)**. Casino felt table.
+10. At game end: **Play again** and **Exit room**.
+11. Disconnect: the game **waits 1 to 2 minutes**, then a **high-intelligence autopilot** plays for the player. The player can return later and take over at the next decision.
+12. WebSockets are robust: auto-reconnect, rejoin with token, versioned state, idempotent actions, ack timeouts and retries, rate limiting, no hidden-info leaks.
+13. Footer on every screen with **Created by Jewel** and the **GitHub link**.
+14. All tests in Section 11 pass, and the README explains how to run everything.
+
+---
+
+## 13. DELIVERABLES ORDER (so nothing gets cut off)
+
+Output in this order, each file complete:
+1. `package.json`, `tailwind.config.js`, `.env.example`
+2. `server/config.js`, `server/utils/*`
+3. `server/game/*` (constants, Card, Deck, combinations, declarations, trickRules, scoring, penalties, finishRule, modes/*, HandEngine, Match, views)
+4. `server/bots/*`
+5. `server/rooms/*`
+6. `server/sockets/*`, `server/http/*`, `server/index.js`
+7. `public/index.html`, `public/css/input.css`, `public/js/*`
+8. `tests/*`
+9. `README.md`
+10. The Section 12 traceability checklist
+
+If you run out of space, **stop at a file boundary and say which file comes next**, then continue when I reply "continue". Never summarise a file in place of writing it.
+
+---
+
+## APPENDIX (OPTIONAL, ONLY AFTER EVERYTHING ABOVE WORKS): BOLD IDEAS
+
+Do **not** build these unless I ask. They are unconventional extras to keep in mind:
+
+1. **Ghost Dealer:** a mysterious croupier character who narrates the game with short, witty lines ("Boris just bluffed with a seven. Brave.").
+2. **Why did he do that?:** after each hand, a replay where you click any bot move and see its reasoning (hand strength, odds from the Monte-Carlo search).
+3. **Heist Mode:** a house rule where a player who wins a Capot "steals" a chip from every other player's stack, with a short animated heist scene.
+4. **Spectator Gallery:** invite-only spectators who sit on a balcony above the table, can cheer with emoji, and cannot see any hands.
+5. **Rival Bots with Memory:** bots that remember how you played in earlier matches in the same room and adjust, so "Big Boris" starts to hold a grudge.
+
+---
+
+### Sources used to verify the rules
+- Pagat, "Belote" (card values, declarations, sequence order, best-declaration rule): https://www.pagat.com/jass/belote.html
+- Wikipedia, "Belote": https://en.wikipedia.org/wiki/Belote
+- Original supplied rule text (NH Fournier, "How to play Belote"): https://www.nhfournier.es/en/como-jugar/belote/
